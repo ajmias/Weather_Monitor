@@ -1,9 +1,9 @@
 // Library to control the SHT1x sensor.
 #include <SHT1x.h>
-#include <string.h>
 
 // Library to control timer interrupt.
 #include <TimerOne.h>
+
 
 // Libraries to control downtime and energy savings.
 #include <avr/sleep.h>
@@ -21,6 +21,12 @@
 // Define the CE and CSN pins for the NRF24L01 module.
 #define CE_PIN   7
 #define CSN_PIN 10
+
+
+#include "hackair.h"
+// Specify your sensor
+hackAIR sensor(SENSOR_PMS5003);
+
 
 // Library to control BMP180.
 #include <Wire.h>
@@ -46,14 +52,6 @@ SHT1x sht1x(dataPin, clockPin);
 // Initialise.
 Adafruit_BMP085 bmp;
 
-// These constants, define values needed for the LDR readings and ADC
-#define LDR_PIN                   0
-#define MAX_ADC_READING           1023
-#define ADC_REF_VOLTAGE           5.0
-#define REF_RESISTANCE            5030  // measure this for best results
-#define LUX_CALC_SCALAR           12518931
-#define LUX_CALC_EXPONENT         -1.405
-
 // Global variable declarations.
 volatile int f_wdt = 1;
 int counter = 0;
@@ -65,6 +63,8 @@ int val = 0;             // Current value of reed switch
 int old_val = 0;         // Old value of reed switch
 int REEDCOUNT = 0;       // The intial count is zero
 volatile float depth_of_rain;
+int dust;
+
 
 // counterHandler: Controls how long the controller should stay asleep
 void counterHandler(){
@@ -124,6 +124,7 @@ void enterSleep(){
     // Increase the interrupt counter.
     counterHandler();
 }
+
 // setupRadio: Configure Radio.
 void setupRadio(){
     // Initialize radio.
@@ -145,44 +146,15 @@ void setupRadio(){
     radio.enableDynamicPayloads();
 }
 
-// Lux meter
-float LuxMeter(void) {
-    int   ldrRawData;
-    float resistorVoltage, ldrVoltage;
-    float ldrResistance;
-    float ldrLux;
-    
-    // Perform the analog to digital conversion  
-    ldrRawData = analogRead(LDR_PIN);
-    
-    // RESISTOR VOLTAGE_CONVERSION
-    // Convert the raw digital data back to the voltage that was measured on the analog pin
-    resistorVoltage = (float)ldrRawData / MAX_ADC_READING * ADC_REF_VOLTAGE;
-
-    // voltage across the LDR is the 5V supply minus the 5k resistor voltage
-    ldrVoltage = ADC_REF_VOLTAGE - resistorVoltage;
-    
-    // LDR_RESISTANCE_CONVERSION
-    // resistance that the LDR would have for that voltage  
-    ldrResistance = ldrVoltage/resistorVoltage * REF_RESISTANCE;
-    
-    // LDR_LUX
-    // Change the code below to the proper conversion from ldrResistance to
-    // ldrLux
-    ldrLux = LUX_CALC_SCALAR * pow(ldrResistance, LUX_CALC_EXPONENT);
-    return ldrLux;
-}
-
 // Rain calculation in mm.
 void RainMeter(){
-
+    
     float volume_of_rain;
     float area_of_funnel;
-    // float depth_of_rain;
-
+    
     // read REED pin.
     val = digitalRead(REED);
-//    Serial.println("reading reed pin");
+    //Serial.println("reading reed pin");
     if ((val == LOW) && (old_val == HIGH)){
         REEDCOUNT = REEDCOUNT + 1;
         delay(10);
@@ -197,14 +169,15 @@ void RainMeter(){
     volume_of_rain = (5.94*REEDCOUNT)/1000;
     area_of_funnel = (3.14/4)*0.165*0.165;
     depth_of_rain = volume_of_rain/area_of_funnel;
-    // return depth_of_rain;
 }
+
 
 void setup(){
     // Initialise Serial port
-//    Serial.begin(57600);
+    // Serial.begin(115200);
     Serial.println("Starting");
-
+    
+    sensor.begin();
     // initialize BMP and Check if connected.
     if (!bmp.begin()) {
         Serial.println("Could not find a valid BMP sensor, check wiring!");
@@ -218,10 +191,8 @@ void setup(){
     Timer1.initialize(100000); // set a timer of length 100000 microseconds (or 0.1 sec - or 10Hz => the led will blink 5 times, 5 cycles of on-and-off, per second)
     Timer1.attachInterrupt(RainMeter); // attach the service routine here
   
-
     // Disable brownout Detection for low power consumption.
     // sleep_bod_disable();
-
 
     // Set sleep mode.
     // set_sleep_mode(SLEEP_MODE_PWR_DOWN);
@@ -231,12 +202,14 @@ void setup(){
         
     // Set Radio.
     setupRadio();
-
+    
 }
 
 void loop(){
-  
-    // initialise sensor data with initial zero's.
+    struct hackAirData data;
+    sensor.refresh(data);   
+    
+  // initialise sensor data with initial zero's.
     sensorData[0] = 0;
     sensorData[1] = 0;
     sensorData[2] = 0;
@@ -244,40 +217,37 @@ void loop(){
     sensorData[4] = 0;
     sensorData[5] = 0;
     sensorData[6] = 0;
-        
+    
     // Read the temperature and Humidity from SHT1x into sensorData.
     sensorData[0] = sht1x.readTemperatureC();
     sensorData[1] = sht1x.readHumidity();
-    sensorData[2] = LuxMeter();
+    sensorData[2] = data.pm25;
     sensorData[3] = bmp.readAltitude();
-    sensorData[4] = bmp.readPressure();
-    sensorData[5] = bmp.readSealevelPressure();
+    sensorData[4] = bmp.readPressure()*(1e-2);
+    sensorData[5] = bmp.readSealevelPressure()*(1e-2);
     sensorData[6] = depth_of_rain; 
-    // delay(2000);
 
     // Control Errors.
     if (isnan(sensorData[0]) || isnan(sensorData[1])|| isnan(sensorData[2])|| isnan(sensorData[3])|| isnan(sensorData[4])|| isnan(sensorData[5])|| isnan(sensorData[6])) {
-        Serial.println("Failed to read sensor!!");
+//        Serial.println("Failed to read sensor!!");
         return;
     }
-////    
-//    string s = String(sensorData[0]);
-//    String t = String(sensorData[1]);
-//    strcat(s,t);
+
     // open a write channel for radio
     radio.openWritingPipe(pipe);
     
     // Write the data.
-//    radio.write(str, sizeof(sensorData));
+    radio.write(sensorData, sizeof(sensorData));
 
     // serially print the sensor data.
-    Serial.println(sensorData[0]);
-    Serial.println(sensorData[1]);
-    Serial.println(sensorData[2]);
-    Serial.println(sensorData[3]);
-    Serial.println(sensorData[4]);
-    Serial.println(sensorData[5]);
-    Serial.println(sensorData[6]);
+//    Serial.println(sensorData[0]);
+//    Serial.println(sensorData[1]);
+//    Serial.println(sensorData[2]);
+//    Serial.println(sensorData[3]);
+//    Serial.println(sensorData[4]);
+//    Serial.println(sensorData[5]);
+//    Serial.println(sensorData[6]);
+//    Serial.println(sensorData[7]);
 
     // Enter sleep mode
     enterSleep();
